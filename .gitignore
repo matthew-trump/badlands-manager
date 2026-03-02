@@ -5,3 +5,4 @@ __pycache__/
 *.pyc
 runsheets/
 sponsor-downloads/
+streamyard_session.json
