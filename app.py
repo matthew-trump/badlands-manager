@@ -1,6 +1,7 @@
 import os
 import re
-from datetime import datetime
+from datetime import datetime, timezone
+from email.utils import parsedate_to_datetime
 from dotenv import load_dotenv
 from googleapiclient.discovery import build
 from google.oauth2.service_account import Credentials
@@ -94,7 +95,6 @@ def download_sponsor_file(url: str, advertiser: str) -> str | None:
     content_disposition = response.headers.get('content-disposition', '')
     file_name = None
     if 'filename' in content_disposition:
-        # Try quoted filename first, then unquoted
         m = re.search(r'filename="([^"]+)"', content_disposition)
         if not m:
             m = re.search(r'filename=([^;]+)', content_disposition)
@@ -106,9 +106,17 @@ def download_sponsor_file(url: str, advertiser: str) -> str | None:
     os.makedirs(SPONSOR_DOWNLOADS_DIR, exist_ok=True)
     local_path = os.path.join(SPONSOR_DOWNLOADS_DIR, file_name)
 
-    if os.path.exists(local_path):
-        print(f"    Already downloaded: {local_path}")
-        return local_path
+    last_modified_header = response.headers.get('Last-Modified')
+    if last_modified_header and os.path.exists(local_path):
+        remote_mtime = parsedate_to_datetime(last_modified_header)
+        local_mtime = datetime.fromtimestamp(os.path.getmtime(local_path), tz=timezone.utc)
+        if local_mtime >= remote_mtime:
+            print(f"    Skipped (up to date): {local_path}")
+            response.close()
+            return local_path
+        print(f"    Remote file is newer, re-downloading: {local_path}")
+    elif os.path.exists(local_path) and not last_modified_header:
+        print(f"    No Last-Modified header, re-downloading: {local_path}")
 
     with open(local_path, 'wb') as f:
         for chunk in response.iter_content(chunk_size=32768):
@@ -126,12 +134,18 @@ def download_spreadsheet(file_id: str, file_name: str, mime_type: str) -> str:
 
     local_path = os.path.join(RUNSHEETS_DIR, local_name)
 
-    if os.path.exists(local_path):
-        print(f"Already downloaded: {local_path}")
-        return local_path
-
     creds = Credentials.from_service_account_file(SERVICE_ACCOUNT_FILE, scopes=SCOPES)
     service = build('drive', 'v3', credentials=creds)
+
+    meta = service.files().get(fileId=file_id, fields='modifiedTime').execute()
+    remote_mtime = datetime.fromisoformat(meta['modifiedTime'].replace('Z', '+00:00'))
+
+    if os.path.exists(local_path):
+        local_mtime = datetime.fromtimestamp(os.path.getmtime(local_path), tz=timezone.utc)
+        if local_mtime >= remote_mtime:
+            print(f"Skipped (up to date): {local_path}")
+            return local_path
+        print(f"Remote file is newer, re-downloading: {local_path}")
 
     if mime_type == 'application/vnd.google-apps.spreadsheet':
         export_mime = 'application/vnd.openxmlformats-officedocument.spreadsheetml.sheet'
